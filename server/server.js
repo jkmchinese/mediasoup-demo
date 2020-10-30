@@ -224,7 +224,7 @@ async function createExpressApp()
 		async (req, res, next) =>
 		{
 			const { broadcasterId } = req.params;
-			const { type, rtcpMux, comedia } = req.body;
+			const { type, rtcpMux, comedia, sctpCapabilities } = req.body;
 
 			try
 			{
@@ -233,7 +233,8 @@ async function createExpressApp()
 						broadcasterId,
 						type,
 						rtcpMux,
-						comedia
+						comedia, 
+						sctpCapabilities
 					});
 
 				res.status(200).json(data);
@@ -334,6 +335,67 @@ async function createExpressApp()
 		});
 
 	/**
+	 * POST API to create a mediasoup DataConsumer associated to a Broadcaster.
+	 * The exact Transport in which the DataConsumer must be created is signaled in
+	 * the URL path. Query body must include the desired producerId to
+	 * consume.
+	 */
+	expressApp.post(
+		'/rooms/:roomId/broadcasters/:broadcasterId/transports/:transportId/consume/data',
+		async (req, res, next) =>
+		{
+			const { broadcasterId, transportId } = req.params;
+			const { dataProducerId } = req.body;
+
+			try
+			{
+				const data = await req.room.createBroadcasterDataConsumer(
+					{
+						broadcasterId,
+						transportId,
+						dataProducerId
+					});
+
+				res.status(200).json(data);
+			}
+			catch (error)
+			{
+				next(error);
+			}
+		});
+	
+	/**
+	 * POST API to create a mediasoup DataProducer associated to a Broadcaster.
+	 * The exact Transport in which the DataProducer must be created is signaled in
+	 */
+	expressApp.post(
+		'/rooms/:roomId/broadcasters/:broadcasterId/transports/:transportId/produce/data',
+		async (req, res, next) =>
+		{
+			const { broadcasterId, transportId } = req.params;
+			const { label, protocol, sctpStreamParameters, appData } = req.body;
+
+			try
+			{
+				const data = await req.room.createBroadcasterDataProducer(
+					{
+						broadcasterId,
+						transportId,
+						label,
+						protocol,
+						sctpStreamParameters,
+						appData
+					});
+
+				res.status(200).json(data);
+			}
+			catch (error)
+			{
+				next(error);
+			}
+		});
+
+	/**
 	 * Error handler.
 	 */
 	expressApp.use(
@@ -402,8 +464,6 @@ async function runProtooWebSocketServer()
 		const u = url.parse(info.request.url, true);
 		const roomId = u.query['roomId'];
 		const peerId = u.query['peerId'];
-		const forceH264 = u.query['forceH264'] === 'true';
-		const forceVP9 = u.query['forceVP9'] === 'true';
 
 		if (!roomId || !peerId)
 		{
@@ -421,7 +481,7 @@ async function runProtooWebSocketServer()
 		// roomId.
 		queue.push(async () =>
 		{
-			const room = await getOrCreateRoom({ roomId, forceH264, forceVP9 });
+			const room = await getOrCreateRoom({ roomId });
 
 			// Accept the protoo WebSocket connection.
 			const protooWebSocketTransport = accept();
@@ -453,7 +513,7 @@ function getMediasoupWorker()
 /**
  * Get a Room instance (or create one if it does not exist).
  */
-async function getOrCreateRoom({ roomId, forceH264 = false, forceVP9 = false })
+async function getOrCreateRoom({ roomId })
 {
 	let room = rooms.get(roomId);
 
@@ -464,7 +524,7 @@ async function getOrCreateRoom({ roomId, forceH264 = false, forceVP9 = false })
 
 		const mediasoupWorker = getMediasoupWorker();
 
-		room = await Room.create({ mediasoupWorker, roomId, forceH264, forceVP9 });
+		room = await Room.create({ mediasoupWorker, roomId });
 
 		rooms.set(roomId, room);
 		room.on('close', () => rooms.delete(roomId));

@@ -24,41 +24,16 @@ class Room extends EventEmitter
 	 * @param {mediasoup.Worker} mediasoupWorker - The mediasoup Worker in which a new
 	 *   mediasoup Router must be created.
 	 * @param {String} roomId - Id of the Room instance.
-	 * @param {Boolean} [forceH264=false] - Whether just H264 must be used in the
-	 *   mediasoup Router video codecs.
-	 * @param {Boolean} [forceVP9=false] - Whether just VP9 must be used in the
-	 *   mediasoup Router video codecs.
 	 */
-	static async create({ mediasoupWorker, roomId, forceH264 = false, forceVP9 = false })
+	static async create({ mediasoupWorker, roomId })
 	{
-		logger.info(
-			'create() [roomId:%s, forceH264:%s, forceVP9:%s]',
-			roomId, forceH264, forceVP9);
+		logger.info('create() [roomId:%s]', roomId);
 
 		// Create a protoo Room instance.
 		const protooRoom = new protoo.Room();
 
 		// Router media codecs.
-		let { mediaCodecs } = config.mediasoup.routerOptions;
-
-		// If forceH264 is given, remove all video codecs but H264.
-		if (forceH264)
-		{
-			mediaCodecs = mediaCodecs
-				.filter((codec) => (
-					codec.kind === 'audio' ||
-					codec.mimeType.toLowerCase() === 'video/h264'
-				));
-		}
-		// If forceVP9 is given, remove all video codecs but VP9.
-		if (forceVP9)
-		{
-			mediaCodecs = mediaCodecs
-				.filter((codec) => (
-					codec.kind === 'audio' ||
-					codec.mimeType.toLowerCase() === 'video/vp9'
-				));
-		}
+		const { mediaCodecs } = config.mediasoup.routerOptions;
 
 		// Create a mediasoup Router.
 		const mediasoupRouter = await mediasoupWorker.createRouter({ mediaCodecs });
@@ -668,6 +643,128 @@ class Room extends EventEmitter
 		};
 	}
 
+	/**
+	 * Create a mediasoup DataConsumer associated to a Broadcaster.
+	 *
+	 * @async
+	 *
+	 * @type {String} broadcasterId
+	 * @type {String} transportId
+	 * @type {String} dataProducerId
+	 */
+	async createBroadcasterDataConsumer(
+		{
+			broadcasterId,
+			transportId,
+			dataProducerId
+		}
+	)
+	{
+		const broadcaster = this._broadcasters.get(broadcasterId);
+
+		if (!broadcaster)
+			throw new Error(`broadcaster with id "${broadcasterId}" does not exist`);
+
+		if (!broadcaster.data.rtpCapabilities)
+			throw new Error('broadcaster does not have rtpCapabilities');
+
+		const transport = broadcaster.data.transports.get(transportId);
+
+		if (!transport)
+			throw new Error(`transport with id "${transportId}" does not exist`);
+
+		const dataConsumer = await transport.consumeData(
+			{
+				dataProducerId
+			});
+
+		// Store it.
+		broadcaster.data.dataConsumers.set(dataConsumer.id, dataConsumer);
+
+		// Set Consumer events.
+		dataConsumer.on('transportclose', () =>
+		{
+			// Remove from its map.
+			broadcaster.data.dataConsumers.delete(dataConsumer.id);
+		});
+
+		dataConsumer.on('dataproducerclose', () =>
+		{
+			// Remove from its map.
+			broadcaster.data.dataConsumers.delete(dataConsumer.id);
+		});
+
+		return {
+			id : dataConsumer.id
+		};
+	}
+
+	/**
+	 * Create a mediasoup DataProducer associated to a Broadcaster.
+	 *
+	 * @async
+	 *
+	 * @type {String} broadcasterId
+	 * @type {String} transportId
+	 */
+	async createBroadcasterDataProducer(
+		{
+			broadcasterId,
+			transportId,
+			label,
+			protocol,
+			sctpStreamParameters,
+			appData
+		}
+	)
+	{
+		const broadcaster = this._broadcasters.get(broadcasterId);
+
+		if (!broadcaster)
+			throw new Error(`broadcaster with id "${broadcasterId}" does not exist`);
+
+		// if (!broadcaster.data.sctpCapabilities)
+		// 	throw new Error('broadcaster does not have sctpCapabilities');
+
+		const transport = broadcaster.data.transports.get(transportId);
+
+		if (!transport)
+			throw new Error(`transport with id "${transportId}" does not exist`);
+
+		const dataProducer = await transport.produceData(
+			{
+				sctpStreamParameters,
+				label,
+				protocol,
+				appData
+			});
+
+		// Store it.
+		broadcaster.data.dataProducers.set(dataProducer.id, dataProducer);
+
+		// Set Consumer events.
+		dataProducer.on('transportclose', () =>
+		{
+			// Remove from its map.
+			broadcaster.data.dataProducers.delete(dataProducer.id);
+		});
+
+		// // Optimization: Create a server-side Consumer for each Peer.
+		// for (const peer of this._getJoinedPeers())
+		// {
+		// 	this._createDataConsumer(
+		// 		{
+		// 			dataConsumerPeer : peer,
+		// 			dataProducerPeer : broadcaster,
+		// 			dataProducer: dataProducer
+		// 		});
+		// }
+
+		return {
+			id : dataProducer.id
+		};
+	}
+
 	_handleAudioLevelObserver()
 	{
 		this._audioLevelObserver.on('volumes', (volumes) =>
@@ -857,13 +954,25 @@ class Room extends EventEmitter
 
 				// NOTE: For testing.
 				// await transport.enableTraceEvent([ 'probation', 'bwe' ]);
-				// await transport.enableTraceEvent([ 'bwe' ]);
+				await transport.enableTraceEvent([ 'bwe' ]);
 
 				transport.on('trace', (trace) =>
 				{
-					logger.info(
+					logger.debug(
 						'transport "trace" event [transportId:%s, trace.type:%s, trace:%o]',
 						transport.id, trace.type, trace);
+
+					if (trace.type === 'bwe' && trace.direction === 'out')
+					{
+						peer.notify(
+							'downlinkBwe',
+							{
+								desiredBitrate          : trace.info.desiredBitrate,
+								effectiveDesiredBitrate : trace.info.effectiveDesiredBitrate,
+								availableBitrate        : trace.info.availableBitrate
+							})
+							.catch(() => {});
+					}
 				});
 
 				// Store the WebRtcTransport into the protoo Peer data Object.
@@ -973,7 +1082,7 @@ class Room extends EventEmitter
 
 				producer.on('trace', (trace) =>
 				{
-					logger.info(
+					logger.debug(
 						'producer "trace" event [producerId:%s, trace.type:%s, trace:%o]',
 						producer.id, trace.type, trace);
 				});
@@ -1209,7 +1318,7 @@ class Room extends EventEmitter
 					case 'bot':
 					{
 						// Pass it to the bot.
-						this._bot.handleDataProducer(
+						this._bot.handlePeerDataProducer(
 							{
 								dataProducerId : dataProducer.id,
 								peer
@@ -1540,7 +1649,7 @@ class Room extends EventEmitter
 
 		consumer.on('trace', (trace) =>
 		{
-			logger.info(
+			logger.debug(
 				'consumer "trace" event [producerId:%s, trace.type:%s, trace:%o]',
 				consumer.id, trace.type, trace);
 		});
