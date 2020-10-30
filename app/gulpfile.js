@@ -251,7 +251,7 @@ gulp.task('live', gulp.series(
 
 		browserSync(
 			{
-				open      : 'external',
+				open      : false,
 				host      : config.domain,
 				startPath : '/?info=true',
 				server    :
